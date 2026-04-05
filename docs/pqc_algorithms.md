@@ -1,110 +1,46 @@
 # PQC Algorithm Reference
 
-## Why These Three Algorithms?
-
-NIST finalized three post-quantum digital signature standards in August 2024. Final Layer implements all three, giving users and validators a choice based on their performance and size requirements.
-
----
-
 ## FN-DSA (Falcon-512) — FIPS 206
 
-**Recommended for most users.**
+Recommended for most users. Lattice-based using NTRU lattices, NIST Level 1 security (AES-128 equivalent).
 
-| Property | Value |
-|---|---|
-| Standard | FIPS 206 |
-| Family | Lattice (NTRU lattices) |
-| Security level | NIST Level 1 (equivalent to AES-128) |
-| Public key size | 897 bytes |
-| Signature size | 666 bytes |
-| Verification time (p99) | 0.24ms (2-core validator) |
-| Gas cost | 1.4 TGas |
+Public key: 897 bytes. Signature: 666 bytes. Verification at p99 on a 2-core validator: 0.24ms. Gas: 1.4 TGas.
 
-**Strengths:** Smallest signatures of the three schemes. Fast verification. Compact on-chain footprint.
-
-**Tradeoffs:** Signing is stateful in some implementations; Final Layer uses the stateless variant.
-
----
+The smallest signatures of the three schemes. Fast verification. Compact on-chain footprint. FN-DSA is the default for wallets and delegators.
 
 ## ML-DSA (Dilithium3) — FIPS 204
 
-**Recommended for institutional validators.**
+Lattice-based using Module-LWE, NIST Level 3 security (AES-192 equivalent).
 
-| Property | Value |
-|---|---|
-| Standard | FIPS 204 |
-| Family | Lattice (Module-LWE) |
-| Security level | NIST Level 3 (equivalent to AES-192) |
-| Public key size | 1952 bytes |
-| Signature size | 3309 bytes |
-| Verification time (p99) | 1.70ms (2-core validator) |
-| Gas cost | 3.0 TGas |
+Public key: 1952 bytes. Signature: 3309 bytes. Verification at p99 on a 2-core validator: 1.70ms. Gas: 3.0 TGas.
 
-**Strengths:** Higher security level than FN-DSA. Simple, well-analyzed construction. Good software performance.
-
-**Tradeoffs:** Larger keys and signatures than FN-DSA. Higher gas cost.
-
----
+Higher security level than FN-DSA at the cost of larger keys and signatures. Used by the secondary validators on the network.
 
 ## SLH-DSA (SPHINCS+-128) — FIPS 205
 
-**For maximum long-term security guarantees.**
+Hash-based using a Merkle hypertree structure, NIST Level 1.
 
-| Property | Value |
-|---|---|
-| Standard | FIPS 205 |
-| Family | Hash-based (Merkle hypertree) |
-| Security level | NIST Level 1 (equivalent to AES-128) |
-| Public key size | 32 bytes |
-| Signature size | ~8000 bytes |
-| Verification time (p99) | 5.10ms (2-core validator) |
-| Gas cost | 8.0 TGas |
+Public key: 32 bytes. Signature: ~8000 bytes. Verification at p99 on a 2-core validator: 5.10ms. Gas: 8.0 TGas.
 
-**Strengths:** Security based entirely on hash function security — no lattice assumptions. Smallest public key. Most conservative security argument.
+The most conservative security argument of the three — security depends only on hash function security, no lattice assumptions. Smallest public key. Largest signatures by a wide margin at ~8KB, which limits throughput due to chunk size constraints.
 
-**Tradeoffs:** Very large signatures (~8KB) consume significant chunk space. Slowest verification. Highest gas cost.
+## Key encoding
 
----
-
-## Key Encoding
-
-All keys use base58 encoding with an algorithm prefix:
+All keys use `algo:base58(bytes)` format:
 
 ```
-fndsa:<base58(bytes)>
-mldsa:<base58(bytes)>
-slhdsa:<base58(bytes)>
+fndsa:34emUD68...
+mldsa:2LtqmDcS...
+slhdsa:2xGjfy...
 ```
 
-When stored in Borsh-serialized format (e.g., inside account state), keys are prefixed with a 4-byte little-endian u32 length value, matching the standard `Vec<u8>` Borsh encoding.
+In Borsh-serialized contexts, a 4-byte little-endian u32 length prefix is prepended before the raw key bytes. The staking contract validates exact byte lengths and panics on any mismatch — no silent truncation.
 
-### Key size validation
+## Comparison
 
-`parse_key_string()` in the staking pool enforces exact byte lengths:
-
-```rust
-let pk_len: usize = match algo {
-    "mldsa"  => 1952,
-    "fndsa"  => 897,
-    "slhdsa" => 32,
-    _        => key_bytes.len(),
-};
-if key_bytes.len() != pk_len {
-    panic!("Key must be exactly {} bytes for {}, got {}", pk_len, algo, key_bytes.len());
-}
-```
-
-This prevents silent truncation of malformed keys.
-
----
-
-## Comparison with Ed25519 (removed)
-
-| | Ed25519 | FN-DSA | ML-DSA | SLH-DSA |
+| | Ed25519 (removed) | FN-DSA | ML-DSA | SLH-DSA |
 |---|---|---|---|---|
-| Quantum-safe | **No** | Yes | Yes | Yes |
-| PK size | 32 bytes | 897 bytes | 1952 bytes | 32 bytes |
-| Sig size | 64 bytes | 666 bytes | 3309 bytes | ~8000 bytes |
-| Verify time | ~0.05ms | ~0.24ms | ~1.70ms | ~5.10ms |
-
-Ed25519 is broken by Shor's algorithm on a cryptographically relevant quantum computer. Final Layer removes it entirely — there is no fallback to classical crypto.
+| Quantum-safe | No | Yes | Yes | Yes |
+| Public key | 32B | 897B | 1952B | 32B |
+| Signature | 64B | 666B | 3309B | ~8000B |
+| Verify time (p99) | ~0.05ms | 0.24ms | 1.70ms | 5.10ms |
