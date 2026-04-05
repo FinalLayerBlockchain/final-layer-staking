@@ -1,94 +1,41 @@
-# Final Layer — Quantum-Resistant Blockchain
+# Final Layer
 
-**Final Layer** is a production fork of [NEAR Protocol](https://near.org) that replaces the deprecated elliptic curve cryptography (Ed25519, secp256k1) with NIST-standardized post-quantum cryptographic signature schemes.
+Final Layer is a fork of [NEAR Protocol](https://near.org) that swaps out Ed25519 and secp256k1 for NIST-standardized post-quantum cryptography. The goal is a production blockchain that stays secure against both classical and quantum adversaries.
 
-## Why Post-Quantum?
+The full node source lives in [nearcore-pq](https://github.com/FinalLayerBlockchain/nearcore-pq). This repo has the staking contract, documentation, and benchmarks.
 
-Elliptic curve cryptography (Ed25519, secp256k1) used in most blockchains today is vulnerable to Shor's algorithm running on a sufficiently powerful quantum computer. NIST finalized its first post-quantum standards in 2024 (FIPS 204, 205, 206). Final Layer implements all three.
+## Supported signature schemes
 
-## Supported Signature Schemes
+Final Layer supports three NIST post-quantum standards. FN-DSA is the recommended default for most users — it has the smallest signatures and the most headroom in gas pricing. ML-DSA offers a higher security level at the cost of larger keys. SLH-DSA has the most conservative security argument (hash-based only, no lattice assumptions) but the largest signatures at ~8KB.
 
-| Algorithm | Standard | Family | Public Key | Signature | Security Level |
-|---|---|---|---|---|---|
-| **FN-DSA** (Falcon-512) | FIPS 206 | Lattice (NTRU) | 897 bytes | 666 bytes | Level 1 |
-| **ML-DSA** (Dilithium3) | FIPS 204 | Lattice (Module) | 1952 bytes | 3309 bytes | Level 3 |
-| **SLH-DSA** (SPHINCS+-128) | FIPS 205 | Hash-based | 32 bytes | ~8000 bytes | Level 1 |
-
-Ed25519 and secp256k1 are removed from this fork.
+| Algorithm | Standard | Public key | Signature | Gas |
+|---|---|---|---|---|
+| FN-DSA (Falcon-512) | FIPS 206 | 897 bytes | 666 bytes | 1.4 TGas |
+| ML-DSA (Dilithium3) | FIPS 204 | 1952 bytes | 3309 bytes | 3.0 TGas |
+| SLH-DSA (SPHINCS+-128) | FIPS 205 | 32 bytes | ~8000 bytes | 8.0 TGas |
 
 ## Architecture
 
-Final Layer is built on NEAR Protocol's sharded architecture:
-- **9 shards** for parallel transaction processing
-- **~1 second** block times
-- **NEAR VM** (WebAssembly) for smart contracts, extended with PQC host functions
-- **Proof-of-Stake** consensus with quantum-resistant validator keys
-- Native token: **FLC** (Final Layer Coin)
+Final Layer inherits NEAR's sharded proof-of-stake design: 9 shards, ~1 second block times, WebAssembly smart contracts, Doomslug consensus. The main additions are three PQC host functions exposed to WASM contracts and a custom staking pool contract that handles PQC key registration, a 48-hour lockup period, and a 4-epoch unbonding window.
 
-## Key Changes from NEAR Protocol
-
-### 1. Cryptographic Layer (`near-crypto`)
-- Replaced Ed25519/secp256k1 with FN-DSA, ML-DSA, SLH-DSA
-- New `KeyType` variants: `MLDSA = 2`, `FNDSA = 3`, `SLHDSA = 4`
-- Borsh serialization uses 4-byte LE length prefix for variable-length PQC keys
-- Key format: `<algo>:<base58(bytes)>` (e.g., `fndsa:3abc...`)
-
-### 2. VM Host Functions (`pqc_host_fns.rs`)
-Three new host functions exposed to WASM contracts:
-```
-pqc_verify_fndsa(pk_ptr, pk_len, sig_ptr, sig_len, msg_ptr, msg_len) -> u64
-pqc_verify_mldsa(pk_ptr, pk_len, sig_ptr, sig_len, msg_ptr, msg_len) -> u64
-pqc_verify_slhdsa(pk_ptr, pk_len, sig_ptr, sig_len, msg_ptr, msg_len) -> u64
-```
-
-Gas costs (protocol v1003, calibrated on min-spec validator hardware):
-- FN-DSA: **1.4 TGas** (p99 = 0.24ms on 2-core/4GB)
-- ML-DSA: **3.0 TGas** (p99 = 1.70ms on 2-core/4GB)
-- SLH-DSA: **8.0 TGas** (p99 = 5.10ms on 2-core/4GB)
-
-### 3. Staking Pool Contract (`fl_staking_pool v5`)
-Custom staking pool with:
-- Time-based lockup (`LOCKUP_NS = 48h`)
-- 4-epoch unbonding period
-- PQC key registration via `parse_key_string()` with exact-length enforcement
-- First-delegator phantom reward fix
-- `claim_rewards()` resets lock timestamp
-
-### 4. Protocol Versioning
-- Protocol versions 1001–1003 (NEAR uses ~60–70)
-- v1001: Genesis with PQC
-- v1002: 9-shard deployment
-- v1003: Gas rebalance (hard fork)
-
-## Repository Structure
+## Repository layout
 
 ```
-final-layer/
-├── contracts/
-│   └── staking-pool/
-│       └── src/lib.rs          # PQC-aware staking pool contract
-├── runtime/
-│   ├── pqc_host_fns.rs         # PQC host function implementations + gas constants
-│   └── version_notes.txt       # Protocol version history
-├── docs/
-│   ├── architecture.md         # System architecture
-│   ├── pqc_algorithms.md       # PQC scheme comparison and rationale
-│   ├── gas_rationale.md        # Why gas constants were set as they are
-│   ├── staking.md              # Staking pool mechanics
-│   ├── benchmarks.md           # PQC verification benchmarks
-│   └── protocol_upgrades.md    # Hard fork procedure
-└── scripts/
-    └── deploy-validator.sh     # Example validator deployment
+contracts/staking-pool/src/lib.rs    Staking pool contract (v5)
+runtime/pqc_host_fns.rs              PQC host function implementations
+docs/architecture.md                 System architecture
+docs/pqc_algorithms.md               Algorithm comparison and encoding details
+docs/gas_rationale.md                How gas constants were derived
+docs/staking.md                      Staking lifecycle and security properties
+docs/benchmarks.md                   Benchmark results across two hardware profiles
+docs/protocol_upgrades.md            Hard fork procedure
+scripts/deploy-validator.sh          Validator setup reference
 ```
 
-## Relation to nearcore
+## Protocol
 
-This repository contains the Final Layer-specific additions and contracts. The full node implementation is built on top of [`nearcore`](https://github.com/TechAdoptionGroup/nearcore) with the following crates modified:
-
-- `core/crypto` — PQC key types
-- `runtime/near-vm-runner/src/logic/` — PQC host functions
-- `core/primitives-core/src/version.rs` — Protocol version
+Chain ID `final-layer-mainnet`, protocol version 1003, native token FLC. Protocol v1003 was a hard fork that raised ML-DSA gas from 2.1 to 3.0 TGas and SLH-DSA from 3.2 to 8.0 TGas based on production benchmark data.
 
 ## License
 
-Apache 2.0 (inherited from NEAR Protocol)
+Apache 2.0, inherited from NEAR Protocol.
