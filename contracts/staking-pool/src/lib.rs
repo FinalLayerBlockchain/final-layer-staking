@@ -9,6 +9,10 @@
  *     Any action (deposit, unstake, claim, compound) resets the lockup timer
  *   - 4-epoch unbonding after unstake before funds can be withdrawn
  *   - Share-based accounting: rewards accrue as the share price rises
+ *
+ * v10 change: internal_ping() now attributes rewards proportionally.
+ * Delegators only earn on their fraction of the total locked balance, so a
+ * validator's personal self-stake earnings are NOT leaked to pool delegators.
  */
 
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
@@ -140,9 +144,9 @@ impl StakingPool {
     #[payable]
     pub fn deposit_and_stake(&mut self) {
         require!(!self.paused, "Pool is paused");
-        // Fix: Sync last_locked_balance before creating first shares.
-        // Without this, the first delegator captures the validator's entire
-        // pre-existing protocol-locked balance as "rewards" via internal_ping().
+        // Bootstrap fix (v5): sync last_locked_balance before creating the first shares.
+        // Without this, the first delegator captures the validator's entire pre-existing
+        // locked balance as "rewards" via internal_ping().
         if self.total_stake_shares == 0 {
             self.last_locked_balance = env::account_locked_balance().as_yoctonear();
         }
@@ -273,6 +277,12 @@ impl StakingPool {
         self.delegators.insert(&account_id, &d);
     }
 
+    /// Trigger reward accounting update without any stake change.
+    /// Anyone can call this. Useful to snapshot rewards before the end of an epoch.
+    pub fn ping(&mut self) {
+        self.internal_ping();
+    }
+
     // ── Owner actions ───────────────────────────────────────────────────────
 
     pub fn update_fees(&mut self, deposit_fee_bps: u16, claim_fee_bps: u16) {
@@ -390,17 +400,45 @@ impl StakingPool {
 
     fn internal_ping(&mut self) {
         let locked = env::account_locked_balance().as_yoctonear();
-        if locked > self.last_locked_balance {
-            // Rewards or new stake detected: credit difference to pool
-            self.total_staked_balance += locked - self.last_locked_balance;
-            self.last_locked_balance = locked;
-        } else if locked < self.last_locked_balance {
-            // Slash or validator kickout: reduce pool balance proportionally
-            // (no slashing on Final Layer currently, but handles future cases)
+
+        if locked > self.last_locked_balance && self.last_locked_balance > 0 {
+            // Reward detected: credit only the delegator-proportional share.
+            //
+            // WHY: account_locked_balance() reflects ALL staked funds on this
+            // validator account — both the delegator pool AND any personal
+            // self-stake the validator holds outside the pool.  Crediting the
+            // full delta would gift the validator's personal yield to delegators.
+            //
+            // FIX: delegators own fraction F = total_staked_balance / last_locked_balance
+            // of the total locked, so their reward share is total_reward × F.
+            //
+            // Proof of correct APY:
+            //   D = delegator stake, V = validator self-stake, r = per-epoch rate
+            //   total_reward = (D + V) × r
+            //   delegator_reward = total_reward × D / (D + V) = D × r  ✓
+            //
+            // When no self-stake: D == D+V, fraction == 1, full reward is credited.
+            let total_reward = locked - self.last_locked_balance;
+            let delegator_reward = muldiv128(
+                total_reward,
+                self.total_staked_balance,
+                self.last_locked_balance,
+            ).min(total_reward); // safety: never credit more than the actual reward
+            self.total_staked_balance += delegator_reward;
+
+        } else if locked < self.last_locked_balance && self.last_locked_balance > 0 {
+            // Slash or forced unstake: reduce delegator stake proportionally.
+            // (No slashing on Final Layer currently, but handles future cases.)
             let decrease = self.last_locked_balance - locked;
-            self.total_staked_balance = self.total_staked_balance.saturating_sub(decrease);
-            self.last_locked_balance = locked;
+            let delegator_decrease = muldiv128(
+                decrease,
+                self.total_staked_balance,
+                self.last_locked_balance,
+            );
+            self.total_staked_balance = self.total_staked_balance.saturating_sub(delegator_decrease);
         }
+
+        self.last_locked_balance = locked;
     }
 
     fn internal_restake(&mut self) {
@@ -411,10 +449,10 @@ impl StakingPool {
         {
             let acct = env::current_account_id().to_string();
             // Never reduce the validator's protocol stake below what it currently is.
-            // king.fl may have self-staked funds that went through the protocol directly
-            // (not through this pool), so total_staked_balance may be less than the
-            // actual locked balance. Issuing stake(total_staked) when total_staked <
-            // locked would drop the validator's stake to just the delegator total.
+            // A validator may have self-staked funds outside this pool, so
+            // total_staked_balance can be less than the actual locked balance.
+            // Issuing stake(total_staked) when total_staked < locked would drop
+            // the validator to just the delegator total at the next epoch boundary.
             let amt  = self.total_staked_balance.max(self.last_locked_balance);
             let pk   = self.staking_key_bytes.clone();
             unsafe {
